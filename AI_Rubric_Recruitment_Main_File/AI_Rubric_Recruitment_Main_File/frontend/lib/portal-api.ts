@@ -11,8 +11,7 @@ export interface PortalUser {
 }
 
 import { getStoredToken } from "./session";
-
-const API_BASE = "/api";
+import { PORTAL_API_BASE as API_BASE } from "./backend-url";
 
 function normalizePortalUser(raw: Partial<PortalUser> & { id: number; email: string; full_name: string }): PortalUser {
   return {

@@ -1,6 +1,5 @@
 import { JobDescription } from "./recruitment-api";
-
-const API_BASE = "/api/recruitment";
+import { RECRUITMENT_API_BASE as API_BASE } from "./backend-url";
 
 export interface ApplyPageData {
   platform: string;

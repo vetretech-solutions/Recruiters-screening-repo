@@ -1,6 +1,5 @@
 import { getStoredToken } from "./session";
-
-const API_BASE = "/api/screening";
+import { SCREENING_API_BASE as API_BASE } from "./backend-url";
 
 function authHeaders(): Record<string, string> {
   const token = getStoredToken();

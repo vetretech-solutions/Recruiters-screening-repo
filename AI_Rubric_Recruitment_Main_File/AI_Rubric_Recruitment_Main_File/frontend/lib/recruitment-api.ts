@@ -1,6 +1,5 @@
 import { getStoredToken } from "./session";
-
-const API_BASE = "/api/recruitment";
+import { RECRUITMENT_API_BASE as API_BASE } from "./backend-url";
 
 function filenameFromDisposition(header: string | null, fallback: string): string {
   if (!header) return fallback;

@@ -37,6 +37,27 @@ recruitment = _load_module("recruitment_routes", "recruitment")
 screening = _load_module("screening_routes", "screening")
 
 
+def _cors_origins() -> list[str]:
+    origins = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
+    for key in ("FRONTEND_URL", "PUBLIC_APP_URL"):
+        url = os.getenv(key, "").strip().rstrip("/")
+        if url and url not in origins:
+            origins.append(url)
+    extra = os.getenv("CORS_ORIGINS", "")
+    for url in extra.split(","):
+        url = url.strip().rstrip("/")
+        if url and url not in origins:
+            origins.append(url)
+    return origins
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     recruitment.init_recruitment_db()
@@ -53,14 +74,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:3001",
-        "http://127.0.0.1:3001",
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
+    allow_origins=_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
