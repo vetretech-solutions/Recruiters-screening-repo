@@ -151,48 +151,61 @@ class ContactSubmission(Base):
     created_at = Column(DateTime, default=utcnow)
 
 
+def _table_exists(conn, table_name: str) -> bool:
+    row = conn.execute(
+        text("SELECT 1 FROM sqlite_master WHERE type='table' AND name=:name"),
+        {"name": table_name},
+    ).fetchone()
+    return row is not None
+
+
+def _table_columns(conn, table_name: str) -> set[str]:
+    if not _table_exists(conn, table_name):
+        return set()
+    return {
+        row[1]
+        for row in conn.execute(text(f"PRAGMA table_info({table_name})")).fetchall()
+    }
+
+
 def _migrate_db() -> None:
     """Add columns/tables for existing SQLite databases."""
     with engine.connect() as conn:
-        cols = {
-            row[1]
-            for row in conn.execute(text("PRAGMA table_info(platform_posts)")).fetchall()
-        }
-        if "account_url" not in cols:
-            conn.execute(text("ALTER TABLE platform_posts ADD COLUMN account_url VARCHAR"))
-        if "external_post_id" not in cols:
-            conn.execute(text("ALTER TABLE platform_posts ADD COLUMN external_post_id VARCHAR"))
+        cols = _table_columns(conn, "platform_posts")
+        if _table_exists(conn, "platform_posts"):
+            if "account_url" not in cols:
+                conn.execute(text("ALTER TABLE platform_posts ADD COLUMN account_url VARCHAR"))
+            if "external_post_id" not in cols:
+                conn.execute(text("ALTER TABLE platform_posts ADD COLUMN external_post_id VARCHAR"))
 
-        user_cols = {
-            row[1] for row in conn.execute(text("PRAGMA table_info(users)")).fetchall()
-        }
-        if "role" not in user_cols:
-            conn.execute(text("ALTER TABLE users ADD COLUMN role VARCHAR DEFAULT 'admin'"))
-        if "status" not in user_cols:
-            conn.execute(text("ALTER TABLE users ADD COLUMN status VARCHAR DEFAULT 'active'"))
-        if "tenant_id" not in user_cols:
-            conn.execute(text("ALTER TABLE users ADD COLUMN tenant_id VARCHAR"))
-        conn.execute(
-            text("UPDATE users SET tenant_id = 'tenant-' || id WHERE tenant_id IS NULL OR tenant_id = ''")
-        )
-        conn.execute(text("UPDATE users SET role = 'admin' WHERE role IS NULL OR role = ''"))
-        conn.execute(text("UPDATE users SET status = 'active' WHERE status IS NULL OR status = ''"))
+        user_cols = _table_columns(conn, "users")
+        if _table_exists(conn, "users"):
+            if "role" not in user_cols:
+                conn.execute(text("ALTER TABLE users ADD COLUMN role VARCHAR DEFAULT 'admin'"))
+            if "status" not in user_cols:
+                conn.execute(text("ALTER TABLE users ADD COLUMN status VARCHAR DEFAULT 'active'"))
+            if "tenant_id" not in user_cols:
+                conn.execute(text("ALTER TABLE users ADD COLUMN tenant_id VARCHAR"))
+            conn.execute(
+                text("UPDATE users SET tenant_id = 'tenant-' || id WHERE tenant_id IS NULL OR tenant_id = ''")
+            )
+            conn.execute(text("UPDATE users SET role = 'admin' WHERE role IS NULL OR role = ''"))
+            conn.execute(text("UPDATE users SET status = 'active' WHERE status IS NULL OR status = ''"))
 
-        applicant_cols = {
-            row[1] for row in conn.execute(text("PRAGMA table_info(applicants)")).fetchall()
-        }
-        for col, ddl in (
-            ("linkedin_url", "ALTER TABLE applicants ADD COLUMN linkedin_url VARCHAR"),
-            ("current_title", "ALTER TABLE applicants ADD COLUMN current_title VARCHAR"),
-            ("current_company", "ALTER TABLE applicants ADD COLUMN current_company VARCHAR"),
-            ("years_experience", "ALTER TABLE applicants ADD COLUMN years_experience VARCHAR"),
-            ("location", "ALTER TABLE applicants ADD COLUMN location VARCHAR"),
-            ("cover_letter", "ALTER TABLE applicants ADD COLUMN cover_letter TEXT"),
-            ("resume_filename", "ALTER TABLE applicants ADD COLUMN resume_filename VARCHAR"),
-            ("resume_file_path", "ALTER TABLE applicants ADD COLUMN resume_file_path VARCHAR"),
-        ):
-            if col not in applicant_cols:
-                conn.execute(text(ddl))
+        applicant_cols = _table_columns(conn, "applicants")
+        if _table_exists(conn, "applicants"):
+            for col, ddl in (
+                ("linkedin_url", "ALTER TABLE applicants ADD COLUMN linkedin_url VARCHAR"),
+                ("current_title", "ALTER TABLE applicants ADD COLUMN current_title VARCHAR"),
+                ("current_company", "ALTER TABLE applicants ADD COLUMN current_company VARCHAR"),
+                ("years_experience", "ALTER TABLE applicants ADD COLUMN years_experience VARCHAR"),
+                ("location", "ALTER TABLE applicants ADD COLUMN location VARCHAR"),
+                ("cover_letter", "ALTER TABLE applicants ADD COLUMN cover_letter TEXT"),
+                ("resume_filename", "ALTER TABLE applicants ADD COLUMN resume_filename VARCHAR"),
+                ("resume_file_path", "ALTER TABLE applicants ADD COLUMN resume_file_path VARCHAR"),
+            ):
+                if col not in applicant_cols:
+                    conn.execute(text(ddl))
 
         oauth_exists = conn.execute(
             text("SELECT name FROM sqlite_master WHERE type='table' AND name='oauth_states'")
@@ -208,8 +221,8 @@ def _migrate_db() -> None:
 
 
 def init_db() -> None:
-    _migrate_db()
     Base.metadata.create_all(bind=engine)
+    _migrate_db()
 
 
 def get_db():
