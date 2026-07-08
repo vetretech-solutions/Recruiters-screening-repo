@@ -57,8 +57,9 @@ MAX_RESUMES_PER_BATCH = 100  # legacy pagination cap (prefer processing all in o
 MAX_TOTAL_RESUMES = 300      # hard cap on resumes inside one ZIP upload
 _ON_RAILWAY = bool(os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_SERVICE_NAME"))
 EXTRACT_WORKERS = int(os.getenv("EXTRACT_WORKERS", "2" if _ON_RAILWAY else "12"))
-STREAM_BATCH_SIZE = int(os.getenv("STREAM_BATCH_SIZE", "3" if _ON_RAILWAY else "15"))
-RAILWAY_SCORE_BATCH = int(os.getenv("RAILWAY_SCORE_BATCH", "20"))
+STREAM_BATCH_SIZE = int(os.getenv("STREAM_BATCH_SIZE", "1" if _ON_RAILWAY else "15"))
+RAILWAY_SCORE_BATCH = int(os.getenv("RAILWAY_SCORE_BATCH", "10"))
+_SESSION_ROOT = os.path.join(tempfile.gettempdir(), "screening_upload_sessions")
 # Cached extracted resumes keyed by upload_session_id (avoids re-parsing ZIP on pagination)
 _upload_sessions: dict = {}
 
@@ -309,6 +310,56 @@ def _extract_resume_text(full_path: str, rel_name: str) -> Optional[dict]:
     return None
 
 
+def _resume_path_entry(full_path: str, rel_name: str) -> dict:
+    return {"name": rel_name, "path": full_path}
+
+
+def _load_resume_content(entry: dict) -> Optional[dict]:
+    if entry.get("content"):
+        return {"name": entry["name"], "content": entry["content"]}
+    path = entry.get("path")
+    if not path:
+        return None
+    _, text = get_resume_content(path)
+    if text.strip():
+        return {"name": entry["name"], "content": text}
+    return None
+
+
+def _session_dir_for(session_key: str) -> str:
+    os.makedirs(_SESSION_ROOT, exist_ok=True)
+    return os.path.join(_SESSION_ROOT, session_key)
+
+
+def _save_session_index(session_key: str, items: List[dict], session_dir: str) -> None:
+    index_path = os.path.join(session_dir, "index.json")
+    with open(index_path, "w", encoding="utf-8") as fh:
+        json.dump({"items": items}, fh)
+
+
+def _load_session_index(session_key: str) -> Optional[dict]:
+    session_dir = _session_dir_for(session_key)
+    index_path = os.path.join(session_dir, "index.json")
+    if not os.path.isfile(index_path):
+        return None
+    with open(index_path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    items = data.get("items") or []
+    if not items:
+        return None
+    return {"items": items, "session_dir": session_dir, "path_only": True}
+
+
+def _purge_old_sessions(max_sessions: int) -> None:
+    if len(_upload_sessions) <= max_sessions:
+        return
+    while len(_upload_sessions) > max_sessions:
+        oldest = next(iter(_upload_sessions))
+        old = _upload_sessions.pop(oldest, None)
+        if isinstance(old, dict) and old.get("session_dir"):
+            shutil.rmtree(old["session_dir"], ignore_errors=True)
+
+
 def _collect_resume_paths(temp_dir: str, files: List[UploadFile]) -> List[tuple]:
     path_items: List[tuple] = []
     for upload_file in files:
@@ -329,7 +380,23 @@ def _collect_resume_paths(temp_dir: str, files: List[UploadFile]) -> List[tuple]
                     path_items.append((full_f_path, rel_name))
         else:
             path_items.append((file_path, upload_file.filename))
+    path_items.sort(key=lambda item: item[1].lower())
     return path_items
+
+
+def _iter_index_resume_paths(temp_dir: str, files: List[UploadFile]):
+    """Railway-friendly: index file paths only (read PDF text lazily during scoring)."""
+    path_items = _collect_resume_paths(temp_dir, files)
+    if not path_items:
+        yield {"items": []}
+        return
+
+    yield {
+        "message": f"Found {len(path_items)} resume file(s). Preparing for scoring...",
+        "extract_progress": len(path_items),
+        "extract_total": len(path_items),
+    }
+    yield {"items": [_resume_path_entry(p, n) for p, n in path_items]}
 
 
 def _iter_extract_all_resumes(temp_dir: str, files: List[UploadFile]):
@@ -395,6 +462,7 @@ async def upload_and_analyse(
     def event_generator():
         conn = get_db_connection()
         temp_dir = tempfile.mkdtemp()
+        session_key = ""
         try:
             cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
             job_role_data = json.loads(job_role_json)
@@ -419,9 +487,24 @@ async def upload_and_analyse(
                 return
 
             if session_key and session_key in _upload_sessions and (use_cache or not files):
-                all_resumes = _upload_sessions[session_key]
+                cached = _upload_sessions[session_key]
+                if isinstance(cached, dict) and cached.get("items"):
+                    all_resumes = cached["items"]
+                else:
+                    all_resumes = cached
                 logger.info(f"Using cached extraction for session {session_key[:8]}... ({len(all_resumes)} resumes)")
+            elif session_key and (use_cache or not files):
+                restored = _load_session_index(session_key)
+                if restored:
+                    _upload_sessions[session_key] = restored
+                    all_resumes = restored["items"]
+                    logger.info(f"Restored session {session_key[:8]}... from disk ({len(all_resumes)} resumes)")
+                else:
+                    all_resumes = []
             else:
+                all_resumes = []
+
+            if not all_resumes:
                 if not files:
                     yield "data: " + json.dumps({
                         "error": "No files uploaded and no cached session found. Please upload resumes again."
@@ -429,16 +512,31 @@ async def upload_and_analyse(
                     return
                 logger.info(f"Extracting resumes from {len(files)} files/ZIPs...")
                 all_resumes = []
-                for extract_event in _iter_extract_all_resumes(temp_dir, files):
-                    if "resumes" in extract_event:
-                        all_resumes = extract_event["resumes"]
-                    else:
-                        yield "data: " + json.dumps(extract_event) + "\n\n"
-                if session_key:
-                    _upload_sessions[session_key] = all_resumes
-                    if len(_upload_sessions) > (5 if _ON_RAILWAY else 20):
-                        oldest = next(iter(_upload_sessions))
-                        _upload_sessions.pop(oldest, None)
+                if _ON_RAILWAY and session_key:
+                    work_dir = _session_dir_for(session_key)
+                    shutil.rmtree(work_dir, ignore_errors=True)
+                    os.makedirs(work_dir, exist_ok=True)
+                    for extract_event in _iter_index_resume_paths(work_dir, files):
+                        if "items" in extract_event:
+                            all_resumes = extract_event["items"]
+                        else:
+                            yield "data: " + json.dumps(extract_event) + "\n\n"
+                    _upload_sessions[session_key] = {
+                        "items": all_resumes,
+                        "session_dir": work_dir,
+                        "path_only": True,
+                    }
+                    _save_session_index(session_key, all_resumes, work_dir)
+                    _purge_old_sessions(3)
+                else:
+                    for extract_event in _iter_extract_all_resumes(temp_dir, files):
+                        if "resumes" in extract_event:
+                            all_resumes = extract_event["resumes"]
+                        else:
+                            yield "data: " + json.dumps(extract_event) + "\n\n"
+                    if session_key:
+                        _upload_sessions[session_key] = all_resumes
+                        _purge_old_sessions(20)
                 if _ON_RAILWAY:
                     gc.collect()
 
@@ -482,14 +580,22 @@ async def upload_and_analyse(
 
             processed = 0
             for i in range(0, len(paged_resumes), STREAM_BATCH_SIZE):
-                batch = paged_resumes[i : i + STREAM_BATCH_SIZE]
+                batch_entries = paged_resumes[i : i + STREAM_BATCH_SIZE]
+                batch = []
+                for entry in batch_entries:
+                    loaded = _load_resume_content(entry)
+                    if loaded:
+                        batch.append(loaded)
                 global_index = offset + processed
                 yield "data: " + json.dumps({
                     "progress": global_index,
                     "total": total_extracted,
                     "total_extracted": total_extracted,
-                    "message": f"Scoring resumes {global_index + 1}–{min(global_index + len(batch), page_end)} of {total_extracted}..."
+                    "message": f"Scoring resumes {global_index + 1}–{min(global_index + len(batch_entries), page_end)} of {total_extracted}..."
                 }) + "\n\n"
+
+                if not batch:
+                    continue
 
                 batch_evals = []
                 try:
@@ -537,6 +643,7 @@ async def upload_and_analyse(
                 conn.commit()
                 if _ON_RAILWAY:
                     gc.collect()
+                    batch.clear()
 
             if processed == 0:
                 yield "data: " + json.dumps({
@@ -563,7 +670,8 @@ async def upload_and_analyse(
             logger.error(f"Upload analysis failed: {e}")
             yield "data: " + json.dumps({"error": str(e)}) + "\n\n"
         finally:
-            shutil.rmtree(temp_dir)
+            if not (_ON_RAILWAY and session_key and session_key in _upload_sessions):
+                shutil.rmtree(temp_dir, ignore_errors=True)
             release_db_connection(conn)
 
     return StreamingResponse(

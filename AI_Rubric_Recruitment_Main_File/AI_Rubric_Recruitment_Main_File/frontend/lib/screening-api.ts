@@ -189,7 +189,7 @@ export async function parseJobRoles(file: File): Promise<JobRole[]> {
 
 export function getScreeningBatchLimit(): number {
   const base = getScreeningApiBase();
-  return base.startsWith("http") ? 20 : 100;
+  return base.startsWith("http") ? 10 : 100;
 }
 
 export async function uploadAndAnalyseResumes(

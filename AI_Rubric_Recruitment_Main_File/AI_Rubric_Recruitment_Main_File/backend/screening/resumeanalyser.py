@@ -220,6 +220,21 @@ def analyse_resumes_stream(
     profile = get_jd_profile(job_role)
     _encode_jd_once(job_role)
 
+    if _ON_RAILWAY and PARALLEL_WORKERS <= 1:
+        for candidate in candidates:
+            try:
+                sim = _compute_similarity(candidate["content"], job_role)
+                result = run_ats_pipeline(
+                    candidate["content"], job_role, sim, embedding_model, weights
+                )
+                yield _build_evaluation(
+                    candidate["name"], candidate["content"], job_role, result, profile
+                )
+            except Exception as e:
+                logger.error(f"Sequential analysis failed for {candidate.get('name')}: {e}")
+                raise
+        return
+
     contents = [c["content"] for c in candidates]
     similarities: List[float] = []
     for i in range(0, len(contents), BATCH_ENCODE_SIZE):

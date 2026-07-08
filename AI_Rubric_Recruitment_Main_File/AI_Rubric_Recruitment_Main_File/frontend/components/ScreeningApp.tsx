@@ -910,9 +910,11 @@ export default function HomePage() {
 
   const alreadyScreenedCount = result?.all_evaluations.length ?? 0;
   const hasNewUploads = uploadedFiles.length > lastScreenedFileCount;
+  const screeningIncomplete =
+    totalExtracted > 0 && alreadyScreenedCount > 0 && alreadyScreenedCount < totalExtracted;
   const canRunAnalysis = uploadedFiles.length > 0
     && rubricWeightsTotal(rubricWeights) === 100
-    && (alreadyScreenedCount === 0 || hasNewUploads);
+    && (alreadyScreenedCount === 0 || hasNewUploads || screeningIncomplete);
 
   const loadInitialData = useCallback(async () => {
     setHealthLoading(true);
@@ -996,7 +998,9 @@ export default function HomePage() {
     setProgress({ current: 0, total: 0 });
 
     const alreadyScreened = result?.all_evaluations.length ?? 0;
-    const isContinuation = alreadyScreened > 0 && !hasNewUploads;
+    const isContinuation =
+      (alreadyScreened > 0 && !hasNewUploads) ||
+      (totalExtracted > 0 && alreadyScreened > 0 && alreadyScreened < totalExtracted);
 
     if (!isContinuation || !uploadSessionRef.current) {
       uploadSessionRef.current = crypto.randomUUID();
@@ -1237,10 +1241,13 @@ export default function HomePage() {
                   background: "rgba(59,130,246,0.08)", border: "1px solid rgba(59,130,246,0.25)",
                   fontSize: "0.82rem", color: "#1d4ed8", textAlign: "left",
                 }}>
-                  <strong>{result!.all_evaluations.length}</strong> resume(s) already screened.
-                  {hasNewUploads
-                    ? " New files detected — run analysis to screen the combined batch."
-                    : " Add more files to screen additional candidates."}
+                  <strong>{result!.all_evaluations.length}</strong> resume(s) screened
+                  {totalExtracted ? ` of ${totalExtracted}` : ""}.
+                  {screeningIncomplete
+                    ? " Server ran out of memory — click Continue Screening to process the next batch."
+                    : hasNewUploads
+                      ? " New files detected — run analysis to screen the combined batch."
+                      : " Add more files to screen additional candidates."}
                 </div>
               )}
 
@@ -1297,7 +1304,13 @@ export default function HomePage() {
                   onClick={handleAnalyse} 
                   style={{ padding: "12px 32px", minWidth: 220, fontSize: "0.9rem" }}
                 >
-                  {hasNewUploads ? "Screen Additional Resumes" : alreadyScreenedCount > 0 ? "All Resumes Screened" : "Run Analysis"}
+                  {hasNewUploads
+                    ? "Screen Additional Resumes"
+                    : screeningIncomplete
+                      ? `Continue Screening (${alreadyScreenedCount}/${totalExtracted})`
+                      : alreadyScreenedCount > 0
+                        ? "All Resumes Screened"
+                        : "Run Analysis"}
                  </button>
                  {loading && !scoringStarted && (
                    <PreScoringLoader message={prepMessage || processingMessage} />
