@@ -1,19 +1,37 @@
 /**
  * Local dev: browser calls `/api/...` (Next.js proxy → BACKEND_URL).
- * Vercel/production: set NEXT_PUBLIC_BACKEND_URL to your Railway URL so
- * uploads and long screening streams bypass Vercel's ~10s serverless limit.
+ * Vercel: server passes BACKEND_URL at render time (see BackendConfig in layout).
+ * Also supports NEXT_PUBLIC_BACKEND_URL when set at build time.
  */
-function normalizeBase(url: string): string {
-  return url.replace(/\/$/, "");
+let runtimeBackendUrl = "";
+
+export function configureBackendUrl(url: string) {
+  runtimeBackendUrl = url.replace(/\/$/, "");
+}
+
+function resolveBackendBase(): string {
+  return (
+    runtimeBackendUrl ||
+    process.env.NEXT_PUBLIC_BACKEND_URL?.trim().replace(/\/$/, "") ||
+    ""
+  );
 }
 
 export function apiUrl(path: string): string {
-  const direct = process.env.NEXT_PUBLIC_BACKEND_URL?.trim();
+  const base = resolveBackendBase();
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-  if (direct) return `${normalizeBase(direct)}${normalizedPath}`;
+  if (base) return `${base}${normalizedPath}`;
   return normalizedPath;
 }
 
-export const PORTAL_API_BASE = apiUrl("/api");
-export const RECRUITMENT_API_BASE = apiUrl("/api/recruitment");
-export const SCREENING_API_BASE = apiUrl("/api/screening");
+export function getPortalApiBase(): string {
+  return apiUrl("/api");
+}
+
+export function getRecruitmentApiBase(): string {
+  return apiUrl("/api/recruitment");
+}
+
+export function getScreeningApiBase(): string {
+  return apiUrl("/api/screening");
+}

@@ -1,5 +1,5 @@
 import { getStoredToken } from "./session";
-import { RECRUITMENT_API_BASE as API_BASE } from "./backend-url";
+import { getRecruitmentApiBase } from "./backend-url";
 
 function filenameFromDisposition(header: string | null, fallback: string): string {
   if (!header) return fallback;
@@ -28,7 +28,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   };
   if (token) headers.Authorization = `Bearer ${token}`;
 
-  const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  const res = await fetch(`${getRecruitmentApiBase()}${path}`, { ...options, headers });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(err.detail || "Request failed");
@@ -138,7 +138,7 @@ export const recruitmentApi = {
 
   downloadJob: async (id: number, title: string) => {
     const token = getStoredToken();
-    const res = await fetch(`${API_BASE}/jd/${id}/download`, {
+    const res = await fetch(`${getRecruitmentApiBase()}/jd/${id}/download`, {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     });
     const text = await res.text();
@@ -195,7 +195,7 @@ export const recruitmentApi = {
 
   downloadApplicantResume: async (jobId: number, applicantId: number, fullName: string) => {
     const token = getStoredToken();
-    const res = await fetch(`${API_BASE}/jd/${jobId}/applicants/${applicantId}/resume`, {
+    const res = await fetch(`${getRecruitmentApiBase()}/jd/${jobId}/applicants/${applicantId}/resume`, {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     });
     if (!res.ok) {
@@ -207,7 +207,7 @@ export const recruitmentApi = {
 
   downloadApplicantApplication: async (jobId: number, applicantId: number, fullName: string) => {
     const token = getStoredToken();
-    const res = await fetch(`${API_BASE}/jd/${jobId}/applicants/${applicantId}/application`, {
+    const res = await fetch(`${getRecruitmentApiBase()}/jd/${jobId}/applicants/${applicantId}/application`, {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     });
     if (!res.ok) {
@@ -219,7 +219,7 @@ export const recruitmentApi = {
 
   exportApplicants: async (jobId: number, title: string) => {
     const token = getStoredToken();
-    const res = await fetch(`${API_BASE}/jd/${jobId}/applicants/export`, {
+    const res = await fetch(`${getRecruitmentApiBase()}/jd/${jobId}/applicants/export`, {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     });
     if (!res.ok) {

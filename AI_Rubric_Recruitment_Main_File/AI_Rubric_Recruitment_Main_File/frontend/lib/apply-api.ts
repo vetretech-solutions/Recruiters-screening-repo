@@ -1,5 +1,5 @@
 import { JobDescription } from "./recruitment-api";
-import { RECRUITMENT_API_BASE as API_BASE } from "./backend-url";
+import { getRecruitmentApiBase } from "./backend-url";
 
 export interface ApplyPageData {
   platform: string;
@@ -31,7 +31,7 @@ async function parseError(res: Response): Promise<string> {
 
 export const applyApi = {
   getJob: async (token: string): Promise<ApplyPageData> => {
-    const res = await fetch(`${API_BASE}/apply/${encodeURIComponent(token)}`);
+    const res = await fetch(`${getRecruitmentApiBase()}/apply/${encodeURIComponent(token)}`);
     if (!res.ok) throw new Error(await parseError(res));
     return res.json();
   },
@@ -54,7 +54,7 @@ export const applyApi = {
       form.append("resume_file", body.resume_file);
     }
 
-    const res = await fetch(`${API_BASE}/apply/${encodeURIComponent(token)}`, {
+    const res = await fetch(`${getRecruitmentApiBase()}/apply/${encodeURIComponent(token)}`, {
       method: "POST",
       body: form,
     });

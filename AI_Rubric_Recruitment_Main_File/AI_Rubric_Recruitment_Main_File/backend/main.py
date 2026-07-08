@@ -6,7 +6,6 @@ Run:
     python main.py
 """
 
-#yes changes made here
 from __future__ import annotations
 
 import importlib.util
@@ -77,6 +76,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins(),
+    allow_origin_regex=r"https://([a-z0-9-]+\.)*vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

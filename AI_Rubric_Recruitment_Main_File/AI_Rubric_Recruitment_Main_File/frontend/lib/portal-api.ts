@@ -11,7 +11,7 @@ export interface PortalUser {
 }
 
 import { getStoredToken } from "./session";
-import { PORTAL_API_BASE as API_BASE } from "./backend-url";
+import { getPortalApiBase } from "./backend-url";
 
 function normalizePortalUser(raw: Partial<PortalUser> & { id: number; email: string; full_name: string }): PortalUser {
   return {
@@ -35,7 +35,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   };
   if (token) headers.Authorization = `Bearer ${token}`;
 
-  const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  const res = await fetch(`${getPortalApiBase()}${path}`, { ...options, headers });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
     const detail = err.detail;
@@ -157,7 +157,7 @@ export async function submitContactForm(data: {
   company?: string;
   message: string;
 }) {
-  const res = await fetch(`${API_BASE}/contact`, {
+  const res = await fetch(`${getPortalApiBase()}/contact`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),

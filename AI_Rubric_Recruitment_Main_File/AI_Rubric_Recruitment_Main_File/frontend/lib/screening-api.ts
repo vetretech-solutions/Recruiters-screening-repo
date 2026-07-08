@@ -1,5 +1,19 @@
 import { getStoredToken } from "./session";
-import { SCREENING_API_BASE as API_BASE } from "./backend-url";
+import { getScreeningApiBase } from "./backend-url";
+
+function parseApiError(status: number, body: string): string {
+  try {
+    const err = JSON.parse(body) as { detail?: string | Array<{ msg?: string }> };
+    if (typeof err.detail === "string" && err.detail) return err.detail;
+    if (Array.isArray(err.detail)) {
+      return err.detail.map((d) => d.msg || JSON.stringify(d)).join("; ");
+    }
+  } catch {
+    /* not JSON */
+  }
+  if (body.trim()) return body.slice(0, 300);
+  return `Request failed (HTTP ${status})`;
+}
 
 function authHeaders(): Record<string, string> {
   const token = getStoredToken();
@@ -149,7 +163,7 @@ export interface HealthResponse {
 }
 
 export async function fetchHealth(): Promise<HealthResponse> {
-  const res = await fetch(`${API_BASE}/health`, { headers: authHeaders() });
+  const res = await fetch(`${getScreeningApiBase()}/health`, { headers: authHeaders() });
   if (!res.ok) throw new Error("Health check failed");
   return res.json();
 }
@@ -161,7 +175,7 @@ export async function fetchJobRoles(): Promise<JobRole[]> {
 export async function parseJobRoles(file: File): Promise<JobRole[]> {
   const formData = new FormData();
   formData.append("file", file);
-  const res = await fetch(`${API_BASE}/parse-job-roles`, {
+  const res = await fetch(`${getScreeningApiBase()}/parse-job-roles`, {
     method: "POST",
     headers: authHeaders(),
     body: formData,
@@ -188,15 +202,15 @@ export async function uploadAndAnalyseResumes(
   formData.append("batch_limit", batchLimit.toString());
   files.forEach((file) => formData.append("files", file));
 
-  const res = await fetch(`${API_BASE}/upload-and-analyse`, {
+  const res = await fetch(`${getScreeningApiBase()}/upload-and-analyse`, {
     method: "POST",
     headers: authHeaders(),
     body: formData,
   });
 
   if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error((err as { detail?: string }).detail || "Analysis failed");
+    const body = await res.text();
+    throw new Error(parseApiError(res.status, body));
   }
 
   const reader = res.body?.getReader();

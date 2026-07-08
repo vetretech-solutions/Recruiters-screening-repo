@@ -82,15 +82,21 @@ def init_screening_db() -> None:
 from psycopg2 import pool as db_pool
 
 # ── Connection Pool ───────────────────────────────────────────
+_db_kwargs = {
+    "host": DB_HOST,
+    "port": DB_PORT,
+    "user": DB_USERNAME,
+    "password": DB_PASSWORD,
+    "dbname": DB_NAME,
+    "connect_timeout": 10,
+}
+if DB_HOST and "neon" in DB_HOST.lower():
+    _db_kwargs["sslmode"] = "require"
+
 try:
     _connection_pool = db_pool.SimpleConnectionPool(
-        1, 30,  # Min 1, Max 30 connections
-        host=DB_HOST,
-        port=DB_PORT,
-        user=DB_USERNAME,
-        password=DB_PASSWORD,
-        dbname=DB_NAME,
-        connect_timeout=10, # Fast fail if DB is slow
+        1, 30,
+        **_db_kwargs,
     )
     logger.info("--- DB Connection Pool Initialized (1-30) ---")
 except Exception as e:
@@ -153,7 +159,7 @@ def create_tables():
         conn.commit()
         logger.info("Tables ensured.")
     finally:
-        conn.close()
+        release_db_connection(conn)
 
 
 
