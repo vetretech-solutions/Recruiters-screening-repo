@@ -17,8 +17,9 @@ from ats_engine import build_jd_text, run_ats_pipeline, get_jd_profile
 
 logger = logging.getLogger(__name__)
 
-PARALLEL_WORKERS = int(os.getenv("SCREENING_WORKERS", "12"))
-BATCH_ENCODE_SIZE = int(os.getenv("SCREENING_ENCODE_BATCH", "64"))
+_ON_RAILWAY = bool(os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_SERVICE_NAME"))
+PARALLEL_WORKERS = int(os.getenv("SCREENING_WORKERS", "1" if _ON_RAILWAY else "12"))
+BATCH_ENCODE_SIZE = int(os.getenv("SCREENING_ENCODE_BATCH", "4" if _ON_RAILWAY else "64"))
 
 try:
     logger.info("Loading SentenceTransformer model 'all-MiniLM-L6-v2'...")
@@ -231,13 +232,21 @@ def analyse_resumes_stream(
 
     work_items = list(zip(candidates, similarities))
 
+    errors: List[str] = []
+    yielded = 0
     with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as executor:
         futures = [executor.submit(_score_one, item) for item in work_items]
         for fut in as_completed(futures):
             try:
                 yield fut.result()
+                yielded += 1
             except Exception as e:
                 logger.error(f"Parallel analysis failed: {e}")
+                errors.append(str(e))
+
+    if yielded == 0 and candidates:
+        detail = errors[0] if errors else "unknown scoring error"
+        raise RuntimeError(f"All {len(candidates)} resume(s) in batch failed to score: {detail}")
 
 
 def bulk_analyse_uploaded_resumes(candidates: List[dict], job_role: JobRole):

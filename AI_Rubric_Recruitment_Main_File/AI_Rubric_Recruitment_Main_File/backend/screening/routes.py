@@ -18,6 +18,7 @@
 import os
 import json
 import logging
+import gc
 from typing import List, Optional
 import psycopg2
 import psycopg2.extras
@@ -48,14 +49,16 @@ from resumeanalyser import (
 )
 from rtr_prompt import generate_rtr_prompt
 from email_utils import send_rtr_email
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from file_utils import extract_zip, get_resume_content, is_resume_file
 from ats_engine import enrich_jd_from_text
 
 MAX_RESUMES_PER_BATCH = 100  # legacy pagination cap (prefer processing all in one stream)
 MAX_TOTAL_RESUMES = 300      # hard cap on resumes inside one ZIP upload
-EXTRACT_WORKERS = int(os.getenv("EXTRACT_WORKERS", "12"))
-STREAM_BATCH_SIZE = int(os.getenv("STREAM_BATCH_SIZE", "15"))
+_ON_RAILWAY = bool(os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_SERVICE_NAME"))
+EXTRACT_WORKERS = int(os.getenv("EXTRACT_WORKERS", "2" if _ON_RAILWAY else "12"))
+STREAM_BATCH_SIZE = int(os.getenv("STREAM_BATCH_SIZE", "3" if _ON_RAILWAY else "15"))
+RAILWAY_SCORE_BATCH = int(os.getenv("RAILWAY_SCORE_BATCH", "20"))
 # Cached extracted resumes keyed by upload_session_id (avoids re-parsing ZIP on pagination)
 _upload_sessions: dict = {}
 
@@ -306,10 +309,8 @@ def _extract_resume_text(full_path: str, rel_name: str) -> Optional[dict]:
     return None
 
 
-def _extract_all_resumes(temp_dir: str, files: List[UploadFile]) -> List[dict]:
-    """Extract resume text from uploads using parallel PDF/DOCX parsing."""
+def _collect_resume_paths(temp_dir: str, files: List[UploadFile]) -> List[tuple]:
     path_items: List[tuple] = []
-
     for upload_file in files:
         safe_filename = upload_file.filename.strip().replace(" ", "_")
         file_path = os.path.join(temp_dir, safe_filename).replace("\\", "/")
@@ -328,20 +329,49 @@ def _extract_all_resumes(temp_dir: str, files: List[UploadFile]) -> List[dict]:
                     path_items.append((full_f_path, rel_name))
         else:
             path_items.append((file_path, upload_file.filename))
+    return path_items
+
+
+def _iter_extract_all_resumes(temp_dir: str, files: List[UploadFile]):
+    """Yield SSE-friendly progress events, then a final {"resumes": [...]} payload."""
+    path_items = _collect_resume_paths(temp_dir, files)
+    if not path_items:
+        yield {"resumes": []}
+        return
+
+    yield {
+        "message": f"Found {len(path_items)} resume file(s). Reading text (large ZIPs may take several minutes)...",
+        "extract_progress": 0,
+        "extract_total": len(path_items),
+    }
 
     all_resumes: List[dict] = []
-    if not path_items:
-        return all_resumes
-
     with ThreadPoolExecutor(max_workers=EXTRACT_WORKERS) as executor:
         futures = [executor.submit(_extract_resume_text, p, n) for p, n in path_items]
-        for fut in futures:
+        done = 0
+        for fut in as_completed(futures):
+            done += 1
             item = fut.result()
             if item:
                 all_resumes.append(item)
+            if done == len(futures) or done % 10 == 0:
+                yield {
+                    "message": f"Reading resume files {done}/{len(futures)}...",
+                    "extract_progress": done,
+                    "extract_total": len(futures),
+                }
 
     all_resumes.sort(key=lambda x: x["name"].lower())
-    return all_resumes
+    yield {"resumes": all_resumes}
+
+
+def _extract_all_resumes(temp_dir: str, files: List[UploadFile]) -> List[dict]:
+    """Extract resume text from uploads using parallel PDF/DOCX parsing."""
+    resumes: List[dict] = []
+    for event in _iter_extract_all_resumes(temp_dir, files):
+        if "resumes" in event:
+            resumes = event["resumes"]
+    return resumes
 
 
 @router.post("/upload-and-analyse")
@@ -359,6 +389,8 @@ async def upload_and_analyse(
     all resumes in parallel batches and streams results back.
     """
     effective_batch_limit = min(batch_limit, MAX_RESUMES_PER_BATCH)
+    if _ON_RAILWAY:
+        effective_batch_limit = min(effective_batch_limit, RAILWAY_SCORE_BATCH)
 
     def event_generator():
         conn = get_db_connection()
@@ -380,6 +412,12 @@ async def upload_and_analyse(
 
             session_key = upload_session_id.strip() if upload_session_id else ""
             use_cache = use_cached_files.strip().lower() in ("1", "true", "yes")
+            if offset > 0 and not session_key:
+                yield "data: " + json.dumps({
+                    "error": "Missing upload session for continuation batch. Please restart analysis from the beginning."
+                }) + "\n\n"
+                return
+
             if session_key and session_key in _upload_sessions and (use_cache or not files):
                 all_resumes = _upload_sessions[session_key]
                 logger.info(f"Using cached extraction for session {session_key[:8]}... ({len(all_resumes)} resumes)")
@@ -390,12 +428,19 @@ async def upload_and_analyse(
                     }) + "\n\n"
                     return
                 logger.info(f"Extracting resumes from {len(files)} files/ZIPs...")
-                all_resumes = _extract_all_resumes(temp_dir, files)
+                all_resumes = []
+                for extract_event in _iter_extract_all_resumes(temp_dir, files):
+                    if "resumes" in extract_event:
+                        all_resumes = extract_event["resumes"]
+                    else:
+                        yield "data: " + json.dumps(extract_event) + "\n\n"
                 if session_key:
                     _upload_sessions[session_key] = all_resumes
-                    if len(_upload_sessions) > 20:
+                    if len(_upload_sessions) > (5 if _ON_RAILWAY else 20):
                         oldest = next(iter(_upload_sessions))
                         _upload_sessions.pop(oldest, None)
+                if _ON_RAILWAY:
+                    gc.collect()
 
             logger.info(f"Total resumes extracted after filtering: {len(all_resumes)}")
             total_extracted = len(all_resumes)
@@ -409,22 +454,28 @@ async def upload_and_analyse(
                 }) + "\n\n"
                 return
 
-            paged_resumes: List[dict] = all_resumes
+            if offset >= total_extracted:
+                yield "data: " + json.dumps({
+                    "error": f"Offset {offset} is out of range. Total extracted: {total_extracted}."
+                }) + "\n\n"
+                return
 
-            logger.info(f"Scoring {len(paged_resumes)} resume(s) (total in upload: {total_extracted})")
+            page_end = min(offset + effective_batch_limit, total_extracted)
+            paged_resumes: List[dict] = all_resumes[offset:page_end]
+            has_more = page_end < total_extracted
+
+            logger.info(
+                f"Scoring resumes {offset + 1}-{page_end} of {total_extracted} "
+                f"(batch limit {effective_batch_limit})"
+            )
 
             yield "data: " + json.dumps({
                 "total_extracted": total_extracted,
-                "message": f"Found {total_extracted} resume(s). Scoring {len(paged_resumes)}..."
+                "message": f"Found {total_extracted} resume(s). Scoring {offset + 1}–{page_end}..."
             }) + "\n\n"
 
             if not paged_resumes:
-                if offset >= total_extracted:
-                    yield "data: " + json.dumps({
-                        "error": f"Offset {offset} is out of range. Total extracted: {total_extracted}."
-                    }) + "\n\n"
-                else:
-                    yield "data: " + json.dumps({"error": "No valid text could be extracted."}) + "\n\n"
+                yield "data: " + json.dumps({"error": "No valid text could be extracted."}) + "\n\n"
                 return
 
             from resumeanalyser import analyse_resumes_stream
@@ -432,46 +483,80 @@ async def upload_and_analyse(
             processed = 0
             for i in range(0, len(paged_resumes), STREAM_BATCH_SIZE):
                 batch = paged_resumes[i : i + STREAM_BATCH_SIZE]
+                global_index = offset + processed
                 yield "data: " + json.dumps({
-                    "progress": processed,
+                    "progress": global_index,
                     "total": total_extracted,
                     "total_extracted": total_extracted,
-                    "message": f"Scoring resumes {processed + 1}–{min(processed + len(batch), total_extracted)} of {total_extracted}..."
+                    "message": f"Scoring resumes {global_index + 1}–{min(global_index + len(batch), page_end)} of {total_extracted}..."
                 }) + "\n\n"
 
                 batch_evals = []
-                for eval_obj in analyse_resumes_stream(batch, job_role, rubric_weights):
-                    batch_evals.append(eval_obj)
-                    processed += 1
-                    try:
-                        cursor.execute("""
-                            INSERT INTO final_selected_candidates 
-                            (candidate_name, job_title, total_score, overall_summary, strengths, areas_for_improvement, recommendation)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s)
-                        """, (
-                            eval_obj.candidate_name, eval_obj.job_title, eval_obj.total_score,
-                            eval_obj.overall_summary, eval_obj.strengths, eval_obj.areas_for_improvement,
-                            eval_obj.recommendation
-                        ))
-                    except Exception as e:
-                        logger.error(f"DB insert failed for {eval_obj.candidate_name}: {e}")
+                try:
+                    for eval_obj in analyse_resumes_stream(batch, job_role, rubric_weights):
+                        batch_evals.append(eval_obj)
+                        processed += 1
+                        try:
+                            cursor.execute("""
+                                INSERT INTO final_selected_candidates 
+                                (candidate_name, job_title, total_score, overall_summary, strengths, areas_for_improvement, recommendation)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                            """, (
+                                eval_obj.candidate_name, eval_obj.job_title, eval_obj.total_score,
+                                eval_obj.overall_summary, eval_obj.strengths, eval_obj.areas_for_improvement,
+                                eval_obj.recommendation
+                            ))
+                        except Exception as e:
+                            logger.error(f"DB insert failed for {eval_obj.candidate_name}: {e}")
 
+                        yield "data: " + json.dumps({
+                            "batch": [_trim_eval_for_stream(eval_obj)],
+                            "progress": offset + processed,
+                            "total": total_extracted,
+                            "message": f"Scored {offset + processed}/{total_extracted} resumes.",
+                            "processed_count": offset + processed,
+                        }) + "\n\n"
+
+                except Exception as batch_err:
+                    logger.error(f"Batch scoring failed at resume {offset + processed + 1}: {batch_err}")
                     yield "data: " + json.dumps({
-                        "batch": [_trim_eval_for_stream(eval_obj)],
-                        "progress": processed,
-                        "total": total_extracted,
-                        "message": f"Scored {processed}/{total_extracted} resumes.",
-                        "processed_count": processed,
+                        "error": f"Scoring stopped at resume {offset + processed + 1}/{total_extracted}: {batch_err}"
                     }) + "\n\n"
+                    return
+
+                if not batch_evals and batch:
+                    yield "data: " + json.dumps({
+                        "error": (
+                            f"Scoring failed for resumes {offset + processed + 1}–"
+                            f"{min(offset + processed + len(batch), page_end)}. "
+                            "Server ran out of memory — try a smaller ZIP or upgrade Railway memory."
+                        )
+                    }) + "\n\n"
+                    return
 
                 conn.commit()
+                if _ON_RAILWAY:
+                    gc.collect()
 
+            if processed == 0:
+                yield "data: " + json.dumps({
+                    "error": (
+                        f"Found {total_extracted} resume(s) but none could be scored in this batch. "
+                        "The server ran out of memory — try 10–20 resumes per upload or upgrade Railway plan."
+                    )
+                }) + "\n\n"
+                return
+
+            next_offset = page_end if has_more else None
             yield "data: " + json.dumps({
                 "done": True,
-                "message": f"Analysis complete — {processed} resume(s) scored.",
+                "message": (
+                    f"Scored {offset + processed}/{total_extracted} resumes."
+                    + (" Continuing with next batch..." if has_more else " Analysis complete.")
+                ),
                 "rubric_weights": rubric_weights.model_dump(),
                 "total_extracted": total_extracted,
-                "nextOffset": None,
+                "nextOffset": next_offset,
             }) + "\n\n"
 
         except Exception as e:
@@ -481,7 +566,15 @@ async def upload_and_analyse(
             shutil.rmtree(temp_dir)
             release_db_connection(conn)
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 @router.post("/send-rtr", tags=["RTR"])
 def send_rtr(request: RTRRequest):

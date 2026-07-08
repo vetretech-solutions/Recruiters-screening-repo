@@ -187,20 +187,33 @@ export async function parseJobRoles(file: File): Promise<JobRole[]> {
   return res.json();
 }
 
+export function getScreeningBatchLimit(): number {
+  const base = getScreeningApiBase();
+  return base.startsWith("http") ? 20 : 100;
+}
+
 export async function uploadAndAnalyseResumes(
   jobRole: JobRole,
   files: File[],
   offset: number,
   batchLimit: number,
   rubricWeights: RubricWeights,
-  onUpdate: (data: Record<string, unknown>) => void
+  onUpdate: (data: Record<string, unknown>) => void,
+  uploadSessionId?: string
 ): Promise<void> {
   const formData = new FormData();
   formData.append("job_role_json", JSON.stringify(jobRole));
   formData.append("rubric_weights_json", JSON.stringify(rubricWeights));
   formData.append("offset", offset.toString());
   formData.append("batch_limit", batchLimit.toString());
-  files.forEach((file) => formData.append("files", file));
+  if (uploadSessionId) {
+    formData.append("upload_session_id", uploadSessionId);
+  }
+  if (offset > 0 && uploadSessionId) {
+    formData.append("use_cached_files", "true");
+  } else {
+    files.forEach((file) => formData.append("files", file));
+  }
 
   let res: Response;
   try {
@@ -231,6 +244,8 @@ export async function uploadAndAnalyseResumes(
   const decoder = new TextDecoder();
   let buffer = "";
   let streamError: string | null = null;
+  let sawDone = false;
+  let scoredCount = 0;
 
   if (!reader) throw new Error("Could not read stream");
 
@@ -243,6 +258,8 @@ export async function uploadAndAnalyseResumes(
       streamError = data.error;
       return;
     }
+    if (data.done) sawDone = true;
+    if (data.batch && Array.isArray(data.batch)) scoredCount += data.batch.length;
     onUpdate(data);
   };
 
@@ -258,6 +275,11 @@ export async function uploadAndAnalyseResumes(
     lines.forEach(processLine);
   }
   if (streamError) throw new Error(streamError);
+  if (!sawDone && scoredCount === 0) {
+    throw new Error(
+      "Analysis stopped before any resume was scored. On Railway, large ZIPs (200+ resumes) often run out of memory — try 5–10 resumes first."
+    );
+  }
 }
 
 export function recommendationColor(rec: string): string {

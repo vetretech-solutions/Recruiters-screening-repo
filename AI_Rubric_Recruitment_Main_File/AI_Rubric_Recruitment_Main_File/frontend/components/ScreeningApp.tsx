@@ -8,6 +8,7 @@ import {
   fetchHealth,
   analyseJobRole,
   uploadAndAnalyseResumes,
+  getScreeningBatchLimit,
   parseJobRoles,
   recommendationColor,
   scoreGrade,
@@ -900,8 +901,9 @@ export default function HomePage() {
   const [scoringStarted, setScoringStarted] = useState(false);
   const [prepMessage, setPrepMessage] = useState("");
   const scoringStartedRef = useRef(false);
+  const uploadSessionRef = useRef("");
   const [offset, setOffset] = useState<number>(0);
-  const [batchLimit] = useState<number>(100);
+  const batchLimit = getScreeningBatchLimit();
   const [totalExtracted, setTotalExtracted] = useState<number>(0);
   const [rubricWeights, setRubricWeights] = useState<RubricWeights>({ ...DEFAULT_RUBRIC_WEIGHTS });
   const [lastScreenedFileCount, setLastScreenedFileCount] = useState(0);
@@ -970,6 +972,7 @@ export default function HomePage() {
     if (e.target.files) {
       const newFiles = Array.from(e.target.files);
       setUploadedFiles((prev) => mergeUploadedFiles(prev, newFiles));
+      uploadSessionRef.current = "";
       e.target.value = "";
     }
   };
@@ -993,7 +996,11 @@ export default function HomePage() {
     setProgress({ current: 0, total: 0 });
 
     const alreadyScreened = result?.all_evaluations.length ?? 0;
-    const isContinuation = alreadyScreened > 0;
+    const isContinuation = alreadyScreened > 0 && !hasNewUploads;
+
+    if (!isContinuation || !uploadSessionRef.current) {
+      uploadSessionRef.current = crypto.randomUUID();
+    }
 
     const prepText = isContinuation
       ? `Preparing to continue from resume ${alreadyScreened + 1}...`
@@ -1024,7 +1031,13 @@ export default function HomePage() {
       while (true) {
         let nextOffset: number | null = null;
 
-        await uploadAndAnalyseResumes(activeJob, uploadedFiles, currentOffset, batchLimit, rubricWeights, (data) => {
+        await uploadAndAnalyseResumes(
+          activeJob,
+          uploadedFiles,
+          currentOffset,
+          batchLimit,
+          rubricWeights,
+          (data) => {
           const streamMessage = data.message ? String(data.message) : undefined;
 
           if (isScoringStartSignal(data, streamMessage)) {
@@ -1036,6 +1049,12 @@ export default function HomePage() {
             if (!scoringStartedRef.current) {
               setPrepMessage(`Found ${data.total_extracted} resume(s). Starting scoring...`);
             }
+          }
+          if (data.extract_progress != null && data.extract_total) {
+            setProgress({
+              current: Number(data.extract_progress),
+              total: Number(data.extract_total),
+            });
           }
           if (data.progress != null && data.total) {
             setProgress({ current: Number(data.progress), total: Number(data.total) });
@@ -1063,9 +1082,12 @@ export default function HomePage() {
             }
             if (data.nextOffset != null) {
               nextOffset = data.nextOffset;
+              setPrepMessage(`Scored ${processedCount} so far — loading next batch...`);
             }
           }
-        });
+        },
+          uploadSessionRef.current
+        );
 
         if (nextOffset != null) {
           currentOffset = nextOffset;
@@ -1296,6 +1318,7 @@ export default function HomePage() {
               }}>
                 {[
                   { label: "Files in Queue", value: `${uploadedFiles.length}` },
+                  { label: "Resumes Found", value: `${totalExtracted || 0}` },
                   { label: "Candidates Screened", value: `${result?.all_evaluations?.length || 0}` },
                   { label: "Target Role", value: result?.job_role?.job_role || "", small: true },
                   { label: "Average Score", value: `${avgScore}/100` },
@@ -1326,7 +1349,7 @@ export default function HomePage() {
                   className={`tab-btn ${activeTab === 'overview' ? 'active' : ''}`}
                   onClick={() => setActiveTab("overview")}
                 >
-                  All Candidates ({totalExtracted || result?.all_evaluations?.length || 0})
+                  All Candidates ({result?.all_evaluations?.length || 0}{totalExtracted ? ` of ${totalExtracted}` : ""})
                 </button>
 
                 {activeTab === "results" && (
