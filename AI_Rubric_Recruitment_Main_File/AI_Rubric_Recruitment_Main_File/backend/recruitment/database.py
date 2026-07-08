@@ -1,6 +1,8 @@
 import json
+import os
 import secrets
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote_plus
 
 from sqlalchemy import (
     Column,
@@ -18,10 +20,41 @@ from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 import pathlib
 
 _DB_FILE = pathlib.Path(__file__).resolve().parent / "recruitment.db"
-SQLALCHEMY_DATABASE_URL = f"sqlite:///{_DB_FILE.as_posix()}"
+
+
+def _build_database_url() -> str:
+    """Use PostgreSQL on Railway/Neon when configured; otherwise local SQLite."""
+    explicit = os.getenv("RECRUITMENT_DATABASE_URL", "").strip()
+    if explicit:
+        return explicit
+
+    direct = os.getenv("DATABASE_URL", "").strip()
+    if direct:
+        if direct.startswith("postgres://"):
+            return direct.replace("postgres://", "postgresql+psycopg2://", 1)
+        return direct
+
+    host = os.getenv("DB_HOST", "").strip()
+    user = os.getenv("DB_USERNAME", "").strip()
+    password = os.getenv("DB_PASSWORD", "")
+    name = os.getenv("DB_NAME", "").strip()
+    port = os.getenv("DB_PORT", "5432").strip()
+    if host and user and name:
+        ssl = "?sslmode=require" if "neon" in host.lower() else ""
+        return (
+            f"postgresql+psycopg2://{quote_plus(user)}:{quote_plus(password)}"
+            f"@{host}:{port}/{name}{ssl}"
+        )
+
+    return f"sqlite:///{_DB_FILE.as_posix()}"
+
+
+SQLALCHEMY_DATABASE_URL = _build_database_url()
+_is_sqlite = SQLALCHEMY_DATABASE_URL.startswith("sqlite")
 
 engine = create_engine(
-    SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}
+    SQLALCHEMY_DATABASE_URL,
+    connect_args={"check_same_thread": False} if _is_sqlite else {},
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -170,6 +203,8 @@ def _table_columns(conn, table_name: str) -> set[str]:
 
 def _migrate_db() -> None:
     """Add columns/tables for existing SQLite databases."""
+    if not _is_sqlite:
+        return
     with engine.connect() as conn:
         cols = _table_columns(conn, "platform_posts")
         if _table_exists(conn, "platform_posts"):

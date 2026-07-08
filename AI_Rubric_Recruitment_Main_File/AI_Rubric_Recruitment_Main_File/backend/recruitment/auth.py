@@ -20,6 +20,10 @@ ADMIN_ROLES = frozenset({"admin", "super_admin"})
 security = HTTPBearer(auto_error=False)
 
 
+def normalize_email(email: str) -> str:
+    return email.strip().lower()
+
+
 def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 

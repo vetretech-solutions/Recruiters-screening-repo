@@ -16,6 +16,7 @@ from auth import (
     create_access_token,
     get_current_user,
     hash_password,
+    normalize_email,
     require_roles,
     resolve_registration_role,
     verify_password,
@@ -157,14 +158,15 @@ def health():
 
 @portal_router.post("/auth/register", response_model=TokenResponse)
 def register(body: UserRegister, db: Session = Depends(get_db)):
-    if db.query(User).filter(User.email == body.email).first():
+    email = normalize_email(body.email)
+    if db.query(User).filter(User.email == email).first():
         raise HTTPException(status_code=400, detail="Email already registered")
-    role = resolve_registration_role(body.email)
+    role = resolve_registration_role(email)
     tenant_id = f"tenant-{secrets.token_urlsafe(8)}"
     user = User(
-        email=body.email,
+        email=email,
         hashed_password=hash_password(body.password),
-        full_name=body.full_name,
+        full_name=body.full_name.strip(),
         role=role,
         status="active",
         tenant_id=tenant_id,
@@ -178,7 +180,8 @@ def register(body: UserRegister, db: Session = Depends(get_db)):
 
 @portal_router.post("/auth/login", response_model=TokenResponse)
 def login(body: UserLogin, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == body.email).first()
+    email = normalize_email(body.email)
+    user = db.query(User).filter(User.email == email).first()
     if not user or not verify_password(body.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid email or password")
     if user.status != "active":
