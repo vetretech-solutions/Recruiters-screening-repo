@@ -202,11 +202,25 @@ export async function uploadAndAnalyseResumes(
   formData.append("batch_limit", batchLimit.toString());
   files.forEach((file) => formData.append("files", file));
 
-  const res = await fetch(`${getScreeningApiBase()}/upload-and-analyse`, {
-    method: "POST",
-    headers: authHeaders(),
-    body: formData,
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${getScreeningApiBase()}/upload-and-analyse`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: formData,
+    });
+  } catch (err) {
+    const base = getScreeningApiBase();
+    const hint =
+      base.startsWith("http")
+        ? "Check Railway is online and CORS allows your Vercel domain."
+        : "BACKEND_URL is missing on Vercel — set it and redeploy.";
+    throw new Error(
+      err instanceof Error
+        ? `Cannot reach backend (${base || "/api/screening"}). ${hint}`
+        : "Cannot reach backend"
+    );
+  }
 
   if (!res.ok) {
     const body = await res.text();

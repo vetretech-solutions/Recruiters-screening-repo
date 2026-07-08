@@ -76,10 +76,11 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins(),
-    allow_origin_regex=r"https://([a-z0-9-]+\.)*vercel\.app",
+    allow_origin_regex=r"https://([a-z0-9-]+\.)*(vercel\.app|vercel\.sh)",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 app.include_router(recruitment.portal_router, prefix="/api")
